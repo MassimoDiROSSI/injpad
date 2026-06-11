@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: ing-challenge
+    runtime: python
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn app:app"
+    plan: standard  # or higher for paid
