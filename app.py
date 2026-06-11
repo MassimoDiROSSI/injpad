@@ -75,6 +75,8 @@ async function test() {
             html += `<div class="step step3">
                 <h3>Step 3: POST /oauth2/oauth2confirm</h3>
                 <p>Status: ${data.step3.status}</p>
+                <p>Token used: ${data.step3.token_used}</p>
+                <p>Ref used: ${data.step3.ref_used}</p>
                 <p>Response:</p>
                 <pre>${JSON.stringify(data.step3.response, null, 2)}</pre>
             </div>`;
@@ -159,8 +161,7 @@ def test_api():
             "status": auth_resp.status_code,
             "location": location,
             "ref": ref,
-            "cookies": dict(session.cookies),
-            "headers": dict(auth_resp.headers)
+            "cookies": dict(session.cookies)
         }
         
         if not ref:
@@ -214,12 +215,13 @@ def test_api():
         csrf_token = init_data["data"]["csrfToken"]
         
         # STEP 3: POST to /oauth2/oauth2confirm
+        # FIX: Use original ref for data.ref, not auth_reference
         confirm_payload = {
             "token": auth_reference,
             "trace": "",
             "data": {
                 "factor": "LOGIN",
-                "ref": auth_reference,
+                "ref": ref,  # <-- ORIGINAL ref from Step 1, NOT auth_reference
                 "credentials": username
             },
             "locale": "PL"
@@ -251,8 +253,8 @@ def test_api():
         result["step3"] = {
             "status": confirm_resp.status_code,
             "response": confirm_data,
-            "auth_ref_sent": auth_reference,
-            "csrf_sent": csrf_token
+            "token_used": auth_reference,
+            "ref_used": ref  # Show which ref we used
         }
         
         if confirm_data.get("status") == "OK":
@@ -283,7 +285,6 @@ def get_challenge():
     session = requests.Session()
     
     try:
-        # Same flow as test-api but return simplified response
         auth_params = {
             "response_type": "code",
             "client_id": "mojeing",
@@ -362,12 +363,13 @@ def get_challenge():
         auth_reference = init_data["data"]["authorizationReference"]
         csrf_token = init_data["data"]["csrfToken"]
         
+        # FIX: Use original ref for data.ref
         confirm_payload = {
             "token": auth_reference,
             "trace": "",
             "data": {
                 "factor": "LOGIN",
-                "ref": auth_reference,
+                "ref": ref,  # <-- ORIGINAL ref
                 "credentials": username
             },
             "locale": "PL"
