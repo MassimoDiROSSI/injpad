@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, make_response
-import asyncio
-from pyppeteer import launch
+import requests
+import re
 import os
 
 app = Flask(__name__)
@@ -11,117 +11,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
-
-async def get_ing_challenge(username):
-    # Launch Chrome
-    browser = await launch(
-        headless=True,
-        executablePath='/usr/bin/google-chrome-stable',
-        args=[
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process'
-        ]
-    )
-    
-    page = await browser.newPage()
-    await page.setViewport({'width': 1920, 'height': 1080})
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-    
-    # Step 1: Navigate to login page and get ref from URL
-    await page.goto('https://login.ingbank.pl/mojeing/app/', waitUntil='networkidle2')
-    await asyncio.sleep(2)  # Wait for JS redirect
-    
-    # Get current URL with ref
-    current_url = page.url
-    print(f"Current URL: {current_url}")
-    
-    # Extract ref from URL
-    import re
-    ref_match = re.search(r'ref=([a-zA-Z0-9]+)', current_url)
-    if not ref_match:
-        await browser.close()
-        return {"error": "Could not extract ref from URL", "url": current_url}
-    
-    ref = ref_match.group(1)
-    print(f"Extracted ref: {ref}")
-    
-    # Step 2: POST ref to /oauth2/oauth2init to get tokens
-    init_response = await page.evaluate(f'''async () => {{
-        const response = await fetch('/oauth2/oauth2init', {{
-            method: 'POST',
-            headers: {{
-                'Content-Type': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest'
-            }},
-            body: JSON.stringify({{
-                "token": "",
-                "trace": "",
-                "data": {{
-                    "ref": "{ref}",
-                    "screenType": "D"
-                }},
-                "locale": "PL"
-            }})
-        }});
-        return await response.json();
-    }}''')
-    
-    print(f"Init response: {init_response}")
-    
-    if init_response.get('status') != 'OK':
-        await browser.close()
-        return {"error": "Init failed", "response": init_response}
-    
-    auth_ref = init_response['data']['authorizationReference']
-    csrf_token = init_response['data']['csrfToken']
-    
-    # Step 3: POST to /oauth2/oauth2confirm with username
-    confirm_response = await page.evaluate(f'''async () => {{
-        const response = await fetch('/oauth2/oauth2confirm', {{
-            method: 'POST',
-            headers: {{
-                'Content-Type': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'X-CSRF-Token': '{csrf_token}'
-            }},
-            body: JSON.stringify({{
-                "token": "{auth_ref}",
-                "trace": "",
-                "data": {{
-                    "factor": "LOGIN",
-                    "ref": "{auth_ref}",
-                    "credentials": "{username}"
-                }},
-                "locale": "PL"
-            }})
-        }});
-        return await response.json();
-    }}''')
-    
-    print(f"Confirm response: {confirm_response}")
-    
-    await browser.close()
-    
-    if confirm_response.get('status') == 'OK':
-        challenge = confirm_response['data']['challenge']
-        return {
-            "success": True,
-            "mask": challenge['mask'],
-            "key": challenge['key'],
-            "salt": challenge['salt'],
-            "ref": confirm_response['data']['ref']
-        }
-    else:
-        return {
-            "success": False,
-            "error": confirm_response.get('msg', 'Unknown error'),
-            "response": confirm_response
-        }
 
 @app.route("/get-challenge", methods=["POST", "GET", "OPTIONS"])
 def get_challenge():
@@ -134,14 +23,162 @@ def get_challenge():
         data = request.get_json() or {}
         username = data.get("username", "pioach3167")
     
+    session = requests.Session()
+    
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(get_ing_challenge(username))
-        loop.close()
+        # STEP 1: GET /oauth2/oauth2authorize to get ref and session cookie
+        auth_params = {
+            "response_type": "code",
+            "client_id": "mojeing",
+            "scope": "openid standard",
+            "state": "g6vUUsHfGMLYgsJVRp6fb778gtNK3X40bgr1kl9-vMQ=",
+            "redirect_uri": "https://login.ingbank.pl/mojeing/rest/oauth2/code/nma",
+            "nonce": "_PH8TBnaGR8AJ_IFVvrDZPRvI9jszkRQVW963GdIn7k",
+            "code_challenge": "XG4M6EJl8ipW3ad6GOCpTYMAuwNCk-oRyMP5kTDzc7M",
+            "code_challenge_method": "S256",
+            "custom": "null"
+        }
         
-        return jsonify(result)
+        auth_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "cs,fr;q=0.9,fr-FR;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Referer": "https://login.ingbank.pl/mojeing/app/",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Priority": "u=0, i",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        }
         
+        # First GET to set cookies
+        auth_resp = session.get(
+            "https://login.ingbank.pl/oauth2/oauth2authorize",
+            params=auth_params,
+            headers=auth_headers,
+            allow_redirects=False,  # Don't follow redirect, capture Location header
+            timeout=15
+        )
+        
+        # Get ref from Location header
+        location = auth_resp.headers.get('Location', '')
+        ref_match = re.search(r'ref=([a-zA-Z0-9]+)', location)
+        
+        if not ref_match:
+            return jsonify({
+                "success": False,
+                "error": "No ref in Location header",
+                "location": location,
+                "status": auth_resp.status_code,
+                "headers": dict(auth_resp.headers)
+            })
+        
+        ref = ref_match.group(1)
+        
+        # Get cookies from response
+        cookies = session.cookies.get_dict()
+        
+        # STEP 2: POST ref to /oauth2/oauth2init
+        init_payload = {
+            "token": "",
+            "trace": "",
+            "data": {
+                "ref": ref,
+                "screenType": "D"
+            },
+            "locale": "PL"
+        }
+        
+        init_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "cs,fr;q=0.9,fr-FR;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Origin": "https://login.ingbank.pl",
+            "Referer": "https://login.ingbank.pl/mojeing/app/",
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+        }
+        
+        init_resp = session.post(
+            "https://login.ingbank.pl/oauth2/oauth2init",
+            json=init_payload,
+            headers=init_headers,
+            timeout=15
+        )
+        
+        init_data = init_resp.json()
+        
+        if init_data.get("status") != "OK":
+            return jsonify({
+                "success": False,
+                "error": "oauth2init failed",
+                "init_response": init_data,
+                "ref": ref
+            })
+        
+        auth_reference = init_data["data"]["authorizationReference"]
+        csrf_token = init_data["data"]["csrfToken"]
+        
+        # STEP 3: POST to /oauth2/oauth2confirm with username
+        confirm_payload = {
+            "token": auth_reference,
+            "trace": "",
+            "data": {
+                "factor": "LOGIN",
+                "ref": auth_reference,
+                "credentials": username
+            },
+            "locale": "PL"
+        }
+        
+        confirm_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "cs,fr;q=0.9,fr-FR;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Origin": "https://login.ingbank.pl",
+            "Referer": "https://login.ingbank.pl/mojeing/app/",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-CSRF-Token": csrf_token,
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+        }
+        
+        confirm_resp = session.post(
+            "https://login.ingbank.pl/oauth2/oauth2confirm",
+            json=confirm_payload,
+            headers=confirm_headers,
+            timeout=15
+        )
+        
+        confirm_data = confirm_resp.json()
+        
+        if confirm_data.get("status") == "OK":
+            challenge = confirm_data["data"]["challenge"]
+            return jsonify({
+                "success": True,
+                "mask": challenge["mask"],
+                "key": challenge["key"],
+                "salt": challenge["salt"],
+                "ref": confirm_data["data"]["ref"],
+                "source": "real"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": confirm_data.get("msg", "Unknown error"),
+                "code": confirm_data.get("code"),
+                "raw": confirm_data
+            })
+            
     except Exception as e:
         import traceback
         return jsonify({
