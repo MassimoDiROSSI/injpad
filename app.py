@@ -27,6 +27,7 @@ TEST_HTML = '''
         .step1 { background: #e3f2fd; }
         .step2 { background: #fff3e0; }
         .step3 { background: #e8f5e9; }
+        .step4 { background: #f3e5f5; }
         .error { background: #ffebee; color: #c62828; }
         pre { background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
         h3 { margin-top: 0; }
@@ -55,30 +56,31 @@ async function test() {
             html += `<div class="step step1">
                 <h3>Step 1: GET /oauth2/oauth2authorize</h3>
                 <p>Status: ${data.step1.status}</p>
-                <p>Location: ${data.step1.location}</p>
-                <p>Ref extracted: ${data.step1.ref || "NONE"}</p>
-                <p>Cookies:</p>
-                <pre>${JSON.stringify(data.step1.cookies, null, 2)}</pre>
+                <p>Ref: ${data.step1.ref}</p>
             </div>`;
         }
         
         if (data.step2) {
             html += `<div class="step step2">
                 <h3>Step 2: POST /oauth2/oauth2init</h3>
-                <p>Status: ${data.step2.status}</p>
-                <p>Response:</p>
-                <pre>${JSON.stringify(data.step2.response, null, 2)}</pre>
+                <p>AuthRef: ${data.step2.auth_ref}</p>
             </div>`;
         }
         
         if (data.step3) {
             html += `<div class="step step3">
-                <h3>Step 3: POST /oauth2/oauth2confirm</h3>
-                <p>Status: ${data.step3.status}</p>
-                <p>Token used: ${data.step3.token_used}</p>
-                <p>Ref used: ${data.step3.ref_used}</p>
+                <h3>Step 3: POST /oauth2/oauth2getauthdata</h3>
+                <p>ConfirmRef: ${data.step3.confirm_ref}</p>
                 <p>Response:</p>
                 <pre>${JSON.stringify(data.step3.response, null, 2)}</pre>
+            </div>`;
+        }
+        
+        if (data.step4) {
+            html += `<div class="step step4">
+                <h3>Step 4: POST /oauth2/oauth2confirm</h3>
+                <p>Response:</p>
+                <pre>${JSON.stringify(data.step4.response, null, 2)}</pre>
             </div>`;
         }
         
@@ -159,9 +161,7 @@ def test_api():
         
         result["step1"] = {
             "status": auth_resp.status_code,
-            "location": location,
-            "ref": ref,
-            "cookies": dict(session.cookies)
+            "ref": ref
         }
         
         if not ref:
@@ -201,27 +201,72 @@ def test_api():
         
         init_data = init_resp.json()
         
-        result["step2"] = {
-            "status": init_resp.status_code,
-            "response": init_data,
-            "ref_sent": ref
-        }
-        
         if init_data.get("status") != "OK":
             result["error"] = "oauth2init failed"
+            result["init_response"] = init_data
             return jsonify(result)
         
         auth_reference = init_data["data"]["authorizationReference"]
         csrf_token = init_data["data"]["csrfToken"]
         
-        # STEP 3: POST to /oauth2/oauth2confirm
-        # FIX: Use original ref for data.ref, not auth_reference
+        result["step2"] = {
+            "auth_ref": auth_reference,
+            "csrf": csrf_token[:10] + "..."
+        }
+        
+        # STEP 3: NEW! POST to /oauth2/oauth2getauthdata
+        getauth_payload = {
+            "token": auth_reference,
+            "trace": "",
+            "data": {
+                "ref": auth_reference  # use auth_reference here
+            },
+            "locale": "PL"
+        }
+        
+        getauth_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "cs,fr;q=0.9,fr-FR;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Origin": "https://login.ingbank.pl",
+            "Referer": "https://login.ingbank.pl/mojeing/app/",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-CSRF-Token": csrf_token,
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+        }
+        
+        getauth_resp = session.post(
+            "https://login.ingbank.pl/oauth2/oauth2getauthdata",
+            json=getauth_payload,
+            headers=getauth_headers,
+            timeout=15
+        )
+        
+        getauth_data = getauth_resp.json()
+        
+        if getauth_data.get("status") != "OK":
+            result["error"] = "oauth2getauthdata failed"
+            result["getauth_response"] = getauth_data
+            return jsonify(result)
+        
+        # Get the confirm ref from getauthdata response
+        confirm_ref = getauth_data["data"]["ref"]
+        
+        result["step3"] = {
+            "confirm_ref": confirm_ref,
+            "response": getauth_data
+        }
+        
+        # STEP 4: POST to /oauth2/oauth2confirm with confirm_ref
         confirm_payload = {
             "token": auth_reference,
             "trace": "",
             "data": {
                 "factor": "LOGIN",
-                "ref": ref,  # <-- ORIGINAL ref from Step 1, NOT auth_reference
+                "ref": confirm_ref,  # <-- Use confirm_ref from getauthdata!
                 "credentials": username
             },
             "locale": "PL"
@@ -250,11 +295,8 @@ def test_api():
         
         confirm_data = confirm_resp.json()
         
-        result["step3"] = {
-            "status": confirm_resp.status_code,
-            "response": confirm_data,
-            "token_used": auth_reference,
-            "ref_used": ref  # Show which ref we used
+        result["step4"] = {
+            "response": confirm_data
         }
         
         if confirm_data.get("status") == "OK":
@@ -285,6 +327,7 @@ def get_challenge():
     session = requests.Session()
     
     try:
+        # Same 4-step flow but return simplified response
         auth_params = {
             "response_type": "code",
             "client_id": "mojeing",
@@ -326,8 +369,9 @@ def get_challenge():
         ref = ref_match.group(1) if ref_match else None
         
         if not ref:
-            return jsonify({"success": False, "error": "No ref", "location": location})
+            return jsonify({"success": False, "error": "No ref"})
         
+        # Step 2: init
         init_payload = {
             "token": "",
             "trace": "",
@@ -358,18 +402,54 @@ def get_challenge():
         init_data = init_resp.json()
         
         if init_data.get("status") != "OK":
-            return jsonify({"success": False, "error": "init failed", "init": init_data})
+            return jsonify({"success": False, "error": "init failed"})
         
         auth_reference = init_data["data"]["authorizationReference"]
         csrf_token = init_data["data"]["csrfToken"]
         
-        # FIX: Use original ref for data.ref
+        # Step 3: getauthdata
+        getauth_payload = {
+            "token": auth_reference,
+            "trace": "",
+            "data": {"ref": auth_reference},
+            "locale": "PL"
+        }
+        
+        getauth_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "cs,fr;q=0.9,fr-FR;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Origin": "https://login.ingbank.pl",
+            "Referer": "https://login.ingbank.pl/mojeing/app/",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-CSRF-Token": csrf_token,
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+        }
+        
+        getauth_resp = session.post(
+            "https://login.ingbank.pl/oauth2/oauth2getauthdata",
+            json=getauth_payload,
+            headers=getauth_headers,
+            timeout=15
+        )
+        
+        getauth_data = getauth_resp.json()
+        
+        if getauth_data.get("status") != "OK":
+            return jsonify({"success": False, "error": "getauthdata failed", "getauth": getauth_data})
+        
+        confirm_ref = getauth_data["data"]["ref"]
+        
+        # Step 4: confirm
         confirm_payload = {
             "token": auth_reference,
             "trace": "",
             "data": {
                 "factor": "LOGIN",
-                "ref": ref,  # <-- ORIGINAL ref
+                "ref": confirm_ref,
                 "credentials": username
             },
             "locale": "PL"
