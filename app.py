@@ -13,39 +13,115 @@ def after_request(response):
     return response
 
 async def get_ing_challenge(username):
+    # Launch Chrome
     browser = await launch(
         headless=True,
-        args=['--no-sandbox', '--disable-setuid-sandbox']
+        executablePath='/usr/bin/google-chrome-stable',
+        args=[
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process'
+        ]
     )
-    page = await browser.newPage()
     
-    # Set user agent
+    page = await browser.newPage()
+    await page.setViewport({'width': 1920, 'height': 1080})
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
     
-    # Navigate to login page
-    await page.goto('https://login.ingbank.pl/', waitUntil='networkidle2')
+    # Step 1: Navigate to login page and get ref from URL
+    await page.goto('https://login.ingbank.pl/mojeing/app/', waitUntil='networkidle2')
+    await asyncio.sleep(2)  # Wait for JS redirect
     
-    # Wait for login input and fill it
-    await page.waitForSelector('input[name="login"]', timeout=10000)
-    await page.type('input[name="login"]', username)
+    # Get current URL with ref
+    current_url = page.url
+    print(f"Current URL: {current_url}")
     
-    # Click next/submit
-    await page.click('button[type="submit"]')
+    # Extract ref from URL
+    import re
+    ref_match = re.search(r'ref=([a-zA-Z0-9]+)', current_url)
+    if not ref_match:
+        await browser.close()
+        return {"error": "Could not extract ref from URL", "url": current_url}
     
-    # Wait for challenge response
-    await page.waitForTimeout(3000)
+    ref = ref_match.group(1)
+    print(f"Extracted ref: {ref}")
     
-    # Extract challenge data from page or network
-    challenge = await page.evaluate('''() => {
-        // Try to find challenge data in window object or DOM
-        if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.challenge) {
-            return window.__INITIAL_STATE__.challenge;
-        }
-        return null;
-    }''')
+    # Step 2: POST ref to /oauth2/oauth2init to get tokens
+    init_response = await page.evaluate(f'''async () => {{
+        const response = await fetch('/oauth2/oauth2init', {{
+            method: 'POST',
+            headers: {{
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            }},
+            body: JSON.stringify({{
+                "token": "",
+                "trace": "",
+                "data": {{
+                    "ref": "{ref}",
+                    "screenType": "D"
+                }},
+                "locale": "PL"
+            }})
+        }});
+        return await response.json();
+    }}''')
+    
+    print(f"Init response: {init_response}")
+    
+    if init_response.get('status') != 'OK':
+        await browser.close()
+        return {"error": "Init failed", "response": init_response}
+    
+    auth_ref = init_response['data']['authorizationReference']
+    csrf_token = init_response['data']['csrfToken']
+    
+    # Step 3: POST to /oauth2/oauth2confirm with username
+    confirm_response = await page.evaluate(f'''async () => {{
+        const response = await fetch('/oauth2/oauth2confirm', {{
+            method: 'POST',
+            headers: {{
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-Token': '{csrf_token}'
+            }},
+            body: JSON.stringify({{
+                "token": "{auth_ref}",
+                "trace": "",
+                "data": {{
+                    "factor": "LOGIN",
+                    "ref": "{auth_ref}",
+                    "credentials": "{username}"
+                }},
+                "locale": "PL"
+            }})
+        }});
+        return await response.json();
+    }}''')
+    
+    print(f"Confirm response: {confirm_response}")
     
     await browser.close()
-    return challenge
+    
+    if confirm_response.get('status') == 'OK':
+        challenge = confirm_response['data']['challenge']
+        return {
+            "success": True,
+            "mask": challenge['mask'],
+            "key": challenge['key'],
+            "salt": challenge['salt'],
+            "ref": confirm_response['data']['ref']
+        }
+    else:
+        return {
+            "success": False,
+            "error": confirm_response.get('msg', 'Unknown error'),
+            "response": confirm_response
+        }
 
 @app.route("/get-challenge", methods=["POST", "GET", "OPTIONS"])
 def get_challenge():
@@ -59,26 +135,13 @@ def get_challenge():
         username = data.get("username", "pioach3167")
     
     try:
-        # Run async function
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         result = loop.run_until_complete(get_ing_challenge(username))
         loop.close()
         
-        if result:
-            return jsonify({
-                "success": True,
-                "mask": result.get("mask"),
-                "key": result.get("key"),
-                "salt": result.get("salt"),
-                "ref": result.get("ref")
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": "Could not extract challenge data"
-            })
-            
+        return jsonify(result)
+        
     except Exception as e:
         import traceback
         return jsonify({
