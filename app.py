@@ -8,7 +8,7 @@ app = Flask(__name__)
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
 
@@ -17,26 +17,75 @@ def index():
     return """
     <!DOCTYPE html>
     <html>
-    <head><title>ING Mask Grab</title></head>
-    <body style="font-family:Arial; padding:40px; background:#f5f5f5;">
+    <head>
+        <title>ING Mask Grab</title>
+        <meta charset="UTF-8">
+    </head>
+    <body style="font-family:Arial, sans-serif; padding:40px; background:#f5f5f5;">
         <div style="max-width:500px; margin:0 auto; background:white; padding:30px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.1);">
-            <h2 style="color:#ff6200;">ING Mask Grab</h2>
-            <input type="text" id="username" placeholder="Enter username" style="width:100%; padding:12px; margin:10px 0; border:1px solid #ddd; border-radius:4px; font-size:16px;">
-            <button onclick="getMask()" style="width:100%; padding:12px; background:#ff6200; color:white; border:none; border-radius:4px; font-size:16px; cursor:pointer;">Get Mask</button>
-            <div id="result" style="margin-top:20px; font-family:monospace; white-space:pre-wrap;"></div>
+            <h2 style="color:#ff6200; margin-top:0;">ING Mask Grab</h2>
+            <input type="text" id="username" placeholder="Enter username (e.g. malbuc2876)" 
+                style="width:100%; padding:12px; margin:10px 0; border:1px solid #ddd; border-radius:4px; font-size:16px; box-sizing:border-box;">
+            <button id="btn" onclick="getMask()" 
+                style="width:100%; padding:12px; background:#ff6200; color:white; border:none; border-radius:4px; font-size:16px; cursor:pointer;">
+                Get Mask
+            </button>
+            <div id="loading" style="display:none; margin-top:15px; color:#666; text-align:center;">Loading...</div>
+            <div id="result" style="margin-top:20px; font-family:monospace; white-space:pre-wrap; word-break:break-all; background:#f8f8f8; padding:15px; border-radius:4px; border:1px solid #e0e0e0;"></div>
         </div>
         <script>
         async function getMask() {
-            const u = document.getElementById("username").value;
-            document.getElementById("result").innerHTML = "Loading...";
+            const u = document.getElementById("username").value.trim();
+            const btn = document.getElementById("btn");
+            const loading = document.getElementById("loading");
+            const result = document.getElementById("result");
+
+            if (!u) {
+                result.innerHTML = "<span style=\'color:red\'>Error: Please enter a username</span>";
+                return;
+            }
+
+            btn.disabled = true;
+            btn.style.opacity = "0.6";
+            loading.style.display = "block";
+            result.innerHTML = "";
+
             try {
-                const r = await fetch("/get-mask?username=" + encodeURIComponent(u));
+                const url = "/get-mask?username=" + encodeURIComponent(u);
+                const r = await fetch(url, {
+                    method: "GET",
+                    headers: {
+                        "Accept": "application/json"
+                    }
+                });
+
+                if (!r.ok) {
+                    throw new Error("HTTP " + r.status + ": " + r.statusText);
+                }
+
                 const d = await r.json();
-                document.getElementById("result").innerHTML = JSON.stringify(d, null, 2);
+                result.innerHTML = JSON.stringify(d, null, 2);
+
+                if (d.success && d.mask) {
+                    result.innerHTML += "\n\n--- MASK VISUAL ---\n";
+                    result.innerHTML += "Position: " + Array.from({length: d.mask_length}, (_, i) => i.toString().padStart(2, "0")).join(" ") + "\n";
+                    result.innerHTML += "Mask:     " + d.mask.split("").map(c => c === "*" ? "[*]" : " + ").join(" ") + "\n";
+                    result.innerHTML += "Required positions: " + d.required_positions.join(", ") + "\n";
+                }
             } catch(e) {
-                document.getElementById("result").innerHTML = "Error: " + e.message;
+                result.innerHTML = "<span style=\'color:red\'>Error: " + e.message + "</span>";
+                console.error(e);
+            } finally {
+                btn.disabled = false;
+                btn.style.opacity = "1";
+                loading.style.display = "none";
             }
         }
+
+        // Allow Enter key to submit
+        document.getElementById("username").addEventListener("keypress", function(e) {
+            if (e.key === "Enter") getMask();
+        });
         </script>
     </body>
     </html>
@@ -46,7 +95,7 @@ def index():
 def get_mask():
     username = request.args.get("username", "").strip()
     if not username:
-        return jsonify({"error": "Username required"})
+        return jsonify({"error": "Username required"}), 400
 
     session = requests.Session()
 
@@ -109,7 +158,7 @@ def get_mask():
                 "location": location,
                 "status": auth_resp.status_code,
                 "headers": dict(auth_resp.headers)
-            })
+            }), 500
 
         # Step 3: POST init
         init_resp = session.post(
@@ -144,7 +193,7 @@ def get_mask():
                 "error": "init failed",
                 "init_response": init_data,
                 "init_status": init_resp.status_code
-            })
+            }), 500
 
         auth_ref = init_data["data"]["authorizationReference"]
         csrf = init_data["data"]["csrfToken"]
@@ -183,11 +232,11 @@ def get_mask():
                 "error": "getauthdata failed",
                 "getauth_response": getauth_data,
                 "getauth_status": getauth_resp.status_code
-            })
+            }), 500
 
         confirm_ref = getauth_data["data"]["ref"]
 
-        # Step 5: POST confirm with username (token = CSRF, ref = auth_ref, credentials = username)
+        # Step 5: POST confirm with username (token = CSRF, ref = confirm_ref, credentials = username)
         confirm_resp = session.post(
             "https://login.ingbank.pl/oauth2/oauth2confirm",
             json={
@@ -225,7 +274,7 @@ def get_mask():
                 "error": "confirm failed",
                 "confirm_response": confirm_data,
                 "confirm_status": confirm_resp.status_code
-            })
+            }), 500
 
         # Extract mask details
         challenge = confirm_data.get("data", {}).get("challenge", {})
@@ -265,7 +314,7 @@ def get_mask():
         return jsonify({
             "error": str(e),
             "traceback": traceback.format_exc()
-        })
+        }), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
